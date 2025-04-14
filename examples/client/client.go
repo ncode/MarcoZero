@@ -15,7 +15,9 @@ func main() {
 	// Create a client
 	cfg := client.ClientConfig{
 		ServerAddress: "127.0.0.1:8620",
-		PreferredMode: common.ModeUnauthenticated,
+		PreferredMode: common.ModeAuthenticated,
+		SharedSecret:  "test-password", // Shared secret for authentication
+		KeyID:         "test-user",     // KeyID that identifies which shared secret to use
 		Timeout:       5 * time.Second,
 	}
 

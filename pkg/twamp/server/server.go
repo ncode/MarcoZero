@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -63,6 +64,7 @@ type controlConnection struct {
 	keyDerivation *crypto.TWAMPKeys
 	sessions      map[common.SessionID]*TestSession
 	lastActivity  time.Time
+	greeting      *messages.ServerGreeting
 }
 
 // portManager manages UDP port allocation for test sessions
@@ -304,6 +306,9 @@ func (s *Server) sendServerGreeting(cc *controlConnection) error {
 		return fmt.Errorf("failed to marshal greeting: %w", err)
 	}
 
+	// Store the greeting with the connection
+	cc.greeting = greeting
+
 	// Send greeting
 	_, err = cc.conn.Write(data)
 	if err != nil {
@@ -363,27 +368,25 @@ func (s *Server) handleClientSetup(cc *controlConnection) error {
 			return fmt.Errorf("unknown KeyID: %s", keyID)
 		}
 
-		// Get the last server greeting sent
-		serverGreeting := &messages.ServerGreeting{
-			// Fill with data from greeting we just sent
-			// Ideally, we would store this with the connection
-			// For now, assume we can reconstruct it
+		// Verify that we have the greeting stored
+		if cc.greeting == nil {
+			return fmt.Errorf("server greeting not available for token verification")
 		}
 
 		// Derive session keys
-		aesKey, hmacKey, err := crypto.DeriveKey(sharedSecret, serverGreeting.Salt[:], serverGreeting.Count)
+		aesKey, hmacKey, err := crypto.DeriveKey(sharedSecret, cc.greeting.Salt[:], cc.greeting.Count)
 		if err != nil {
 			return fmt.Errorf("failed to derive keys: %w", err)
 		}
 
 		// Decrypt and verify token
-		tokenContents, err := crypto.DecryptToken(setupResponse.Token[:], serverGreeting.Challenge[:])
+		tokenContents, err := crypto.DecryptToken(setupResponse.Token[:], cc.greeting.Challenge[:])
 		if err != nil {
 			return fmt.Errorf("failed to decrypt token: %w", err)
 		}
 
 		// Verify challenge matches
-		if !compareBytes(tokenContents.Challenge, serverGreeting.Challenge[:]) {
+		if !compareBytes(tokenContents.Challenge, cc.greeting.Challenge[:]) {
 			return errors.New("challenge mismatch in token")
 		}
 
@@ -410,6 +413,13 @@ func (s *Server) handleClientSetup(cc *controlConnection) error {
 	// Fill in ServerIV for secure modes
 	if cc.mode != common.ModeUnauthenticated {
 		copy(serverStart.ServerIV[:], cc.keyDerivation.ServerIV)
+	} else {
+		// Always generate ServerIV even in unauthenticated mode
+		serverIV, err := crypto.NewRandomIV()
+		if err != nil {
+			return fmt.Errorf("failed to generate server IV: %w", err)
+		}
+		copy(serverStart.ServerIV[:], serverIV)
 	}
 
 	// Set start time
@@ -421,10 +431,21 @@ func (s *Server) handleClientSetup(cc *controlConnection) error {
 		return fmt.Errorf("failed to marshal Server-Start: %w", err)
 	}
 
+	// Make sure TCP sends this in a single packet by enabling TCP_NODELAY
+	if tcpConn, ok := cc.conn.(*net.TCPConn); ok {
+		// Disable Nagle algorithm to prevent combining small packets
+		tcpConn.SetNoDelay(true)
+	}
+
 	// Send Server-Start
-	_, err = cc.conn.Write(data)
+	written, err := cc.conn.Write(data)
 	if err != nil {
 		return fmt.Errorf("failed to send Server-Start: %w", err)
+	}
+
+	if written != len(data) {
+		return fmt.Errorf("failed to send complete Server-Start: wrote %d of %d bytes",
+			written, len(data))
 	}
 
 	return nil
@@ -435,12 +456,8 @@ func compareBytes(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	// Use a constant-time comparison to prevent timing attacks
+	return subtle.ConstantTimeCompare(a, b) == 1
 }
 
 // readCommand reads a command from the control connection
