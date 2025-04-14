@@ -299,8 +299,12 @@ type ReflectorTestPacketAuth struct {
 
 // Marshal converts ReflectorTestPacketAuth to network bytes
 func (rtpa *ReflectorTestPacketAuth) Marshal() ([]byte, error) {
-	// Base size (104) + padding
-	size := 104 + rtpa.PaddingSize
+	// Base size (112) + padding (to fit auth)
+	minSize := 112
+	size := minSize
+	if rtpa.PaddingSize > 0 {
+		size = minSize + rtpa.PaddingSize
+	}
 	buf := make([]byte, size)
 
 	// Sequence Number (4 bytes)

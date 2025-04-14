@@ -3,12 +3,12 @@ package main
 
 import (
 	"context"
+	"github.com/ncode/MarcoZero/pkg/twamp/common"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/ncode/MarcoZero/pkg/twamp/common"
 	"github.com/ncode/MarcoZero/pkg/twamp/server"
 )
 

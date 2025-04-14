@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha1"
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/ncode/MarcoZero/pkg/twamp/common"
@@ -78,13 +79,13 @@ func DeriveKey(secret string, salt []byte, count uint32) ([]byte, []byte, error)
 // This is used by the Control-Client when responding to Server Greeting
 func CreateToken(challenge []byte, aesKey, hmacKey []byte) ([]byte, error) {
 	if len(challenge) != 16 {
-		return nil, ErrInvalidChallengeLen
+		return nil, fmt.Errorf("challenge must be exactly 16 bytes, got %d", len(challenge))
 	}
 	if len(aesKey) != 16 {
-		return nil, ErrInvalidKeyLength
+		return nil, fmt.Errorf("AES key must be exactly 16 bytes, got %d", len(aesKey))
 	}
 	if len(hmacKey) != 32 {
-		return nil, ErrInvalidKeyLength
+		return nil, fmt.Errorf("HMAC key must be exactly 32 bytes, got %d", len(hmacKey))
 	}
 
 	// Create 64-byte token: 16 bytes challenge + 16 bytes AES key + 32 bytes HMAC key
@@ -96,7 +97,7 @@ func CreateToken(challenge []byte, aesKey, hmacKey []byte) ([]byte, error) {
 	// Create AES cipher with challenge as key
 	block, err := aes.NewCipher(challenge)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
 	// Encrypt using CBC with zero IV
@@ -112,16 +113,16 @@ func CreateToken(challenge []byte, aesKey, hmacKey []byte) ([]byte, error) {
 // This is used by the Server to verify the Control-Client's token
 func DecryptToken(token, challenge []byte) (*TokenContents, error) {
 	if len(token) != 64 {
-		return nil, ErrInvalidTokenLength
+		return nil, fmt.Errorf("token must be exactly 64 bytes, got %d", len(token))
 	}
 	if len(challenge) != 16 {
-		return nil, ErrInvalidChallengeLen
+		return nil, fmt.Errorf("challenge must be exactly 16 bytes, got %d", len(challenge))
 	}
 
 	// Create AES cipher with challenge as key
 	block, err := aes.NewCipher(challenge)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
 	// Decrypt using CBC with zero IV
@@ -130,7 +131,7 @@ func DecryptToken(token, challenge []byte) (*TokenContents, error) {
 	mode := cipher.NewCBCDecrypter(block, iv)
 	mode.CryptBlocks(plaintext, token)
 
-	// Extract token contents
+	// Extract token contents with additional validation
 	contents := &TokenContents{
 		Challenge: make([]byte, 16),
 		AESKey:    make([]byte, 16),
