@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -179,7 +180,7 @@ func (c *Client) negotiateMode(greeting *messages.ServerGreeting) error {
 		}
 
 		// Set token and KeyID in setup response
-		copy(setupResponse.KeyID[:], []byte(c.config.KeyID))
+		copy(setupResponse.KeyID[:], c.config.KeyID)
 		copy(setupResponse.Token[:], token)
 		copy(setupResponse.ClientIV[:], clientIV)
 	}
@@ -291,6 +292,25 @@ func (c *Client) RequestSession(config TestSessionConfig) (*TestSession, error) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Calculate minimum required padding
+	originalPadding := config.PaddingLength
+	var minPadding uint32
+	switch c.mode {
+	case common.ModeAuthenticated:
+		minPadding = 41 // 14 header + 27 specified in RFC = 41 total
+	case common.ModeUnauthenticated:
+		minPadding = 57 // For authenticated mode
+	case common.ModeEncrypted:
+		minPadding = 144 // For encrypted mode
+	}
+
+	// Adjust padding if needed
+	if config.PaddingLength < minPadding {
+		config.PaddingLength = minPadding
+		log.Printf("Warning: Padding length increased from %d to %d bytes to meet %s mode requirements",
+			originalPadding, minPadding, common.ModeToString(c.mode))
+	}
+
 	// Set default timeout if not provided
 	if config.Timeout == 0 {
 		config.Timeout = 3 * time.Second
@@ -337,7 +357,7 @@ func (c *Client) RequestSession(config TestSessionConfig) (*TestSession, error) 
 	}
 
 	// Set timeout as TWAMP timestamp
-	timeoutDuration := time.Duration(config.Timeout)
+	timeoutDuration := config.Timeout
 	timeoutSeconds := uint32(timeoutDuration / time.Second)
 	timeoutFraction := uint32(float64(timeoutDuration%time.Second) * common.NanoToFrac)
 	request.Timeout = common.TWAMPTimestamp{
@@ -583,7 +603,7 @@ func (c *Client) StopSessions() error {
 		err := session.Stop()
 		if err != nil {
 			// Log the error but continue stopping other sessions
-			fmt.Printf("Error stopping session %x: %v\n", sid, err)
+			log.Printf("Error stopping session %x: %v\n", sid, err)
 		}
 		stoppedSessions[sid] = struct{}{}
 	}

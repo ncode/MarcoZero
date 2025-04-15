@@ -331,8 +331,11 @@ func EncryptTWAMPTestPacket(key, iv []byte, packet []byte, isAuthenticated bool)
 			return nil, ErrInvalidBlockSize
 		}
 
-		// Use CBC mode for 6 blocks
-		mode := cipher.NewCBCEncrypter(block, iv)
+		// Create a zero IV as required by RFC 5357
+		zeroIV := make([]byte, aes.BlockSize)
+
+		// Use CBC mode for 6 blocks with zero IV
+		mode := cipher.NewCBCEncrypter(block, zeroIV)
 		mode.CryptBlocks(result[:96], packet[:96])
 	}
 
@@ -374,8 +377,11 @@ func DecryptTWAMPTestPacket(key, iv []byte, packet []byte, isAuthenticated bool)
 			return nil, ErrInvalidBlockSize
 		}
 
-		// Use CBC mode for 6 blocks
-		mode := cipher.NewCBCDecrypter(block, iv)
+		// Create a zero IV as required by RFC 5357
+		zeroIV := make([]byte, aes.BlockSize)
+
+		// Use CBC mode for 6 blocks with zero IV
+		mode := cipher.NewCBCDecrypter(block, zeroIV)
 		mode.CryptBlocks(result[:96], packet[:96])
 	}
 
