@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ncode/MarcoZero/pkg/twamp/common"
@@ -53,8 +55,9 @@ type TestSession struct {
 	dscp             uint8
 	reflectedPackets uint32
 	startTime        time.Time
-	isActive         bool
+	isActive         atomic.Bool
 	stopChan         chan struct{}
+	mu               sync.Mutex
 }
 
 // controlConnection represents a TWAMP control connection
@@ -725,7 +728,7 @@ func (s *Server) sendStartAck(cc *controlConnection, acceptCode uint8) error {
 // startSession starts a test session
 func (s *Server) startSession(session *TestSession) error {
 	// Only start if not already active
-	if session.isActive {
+	if session.isActive.Load() {
 		return nil
 	}
 
@@ -735,18 +738,25 @@ func (s *Server) startSession(session *TestSession) error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on port %d: %w", session.reflectorPort, err)
 	}
+
+	session.mu.Lock()
 	session.conn = conn
+	session.startTime = time.Now()
+	// Create a new stop channel if needed
+	if session.stopChan == nil {
+		session.stopChan = make(chan struct{})
+	}
+	session.mu.Unlock()
 
 	// Set DSCP if specified
 	if session.dscp > 0 {
-		// In Go, this requires platform-specific code
-		// For now, we'll just log it
 		// TODO: Implement DSCP setting for different platforms
 	}
 
+	// Mark as active using atomic
+	session.isActive.Store(true)
+
 	// Start receiving and reflecting packets
-	session.isActive = true
-	session.startTime = time.Now()
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -759,23 +769,44 @@ func (s *Server) startSession(session *TestSession) error {
 // reflectPackets receives and reflects test packets for a session
 func (s *Server) reflectPackets(session *TestSession) {
 	defer func() {
-		if session.conn != nil {
-			session.conn.Close()
+		session.mu.Lock()
+		conn := session.conn
+		session.conn = nil
+		session.mu.Unlock()
+
+		if conn != nil {
+			conn.Close()
 		}
 	}()
 
 	buf := make([]byte, 2048) // Large enough for any test packet
 
 	for {
+		// Check if session is active using atomic
+		if !session.isActive.Load() {
+			return
+		}
+
+		// Get connection and stopChan safely
+		session.mu.Lock()
+		conn := session.conn
+		stopChan := session.stopChan
+		session.mu.Unlock()
+
+		if conn == nil {
+			return
+		}
+
+		// Set read deadline to allow for context cancellation
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+
+		// Use select with the local stopChan copy
 		select {
-		case <-session.stopChan:
+		case <-stopChan:
 			return
 		default:
-			// Set read deadline to allow for context cancellation
-			session.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-
 			// Receive test packet
-			n, addr, err := session.conn.ReadFrom(buf)
+			n, addr, err := conn.ReadFrom(buf)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					// This is just a timeout, continue
@@ -802,7 +833,7 @@ func (s *Server) reflectPackets(session *TestSession) {
 			// Process and reflect the packet
 			err = s.processAndReflect(session, buf[:n], addr)
 			if err != nil {
-				// Log error but continue processing
+				log.Printf("Error calling processAndReflect: %s", err.Error())
 				continue
 			}
 
@@ -1014,29 +1045,29 @@ func (s *Server) handleStopSessions(cc *controlConnection, cmdData []byte) error
 
 // stopSession stops a test session
 func (s *Server) stopSession(session *TestSession) {
-	// Only stop if active
-	if !session.isActive {
-		return
+	// Fast check if already stopped using atomic
+	if !session.isActive.CompareAndSwap(true, false) {
+		return // Already inactive
 	}
 
-	// Signal reflector goroutine to stop
-	close(session.stopChan)
+	// Get stopChan reference safely
+	session.mu.Lock()
+	stopChan := session.stopChan
+	session.stopChan = nil
+	session.mu.Unlock()
 
-	// Close UDP connection
-	if session.conn != nil {
-		session.conn.Close()
-		session.conn = nil
+	// Safe to close outside the lock
+	if stopChan != nil {
+		close(stopChan)
 	}
-
-	// Release port
-	s.portManager.releasePort(session.reflectorPort)
 
 	// Remove from sessions map
 	s.sessionsMu.Lock()
 	delete(s.sessions, session.sid)
 	s.sessionsMu.Unlock()
 
-	session.isActive = false
+	// Release port
+	s.portManager.releasePort(session.reflectorPort)
 }
 
 // Stop stops the TWAMP server

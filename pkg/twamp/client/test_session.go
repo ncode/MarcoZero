@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"strconv"
@@ -255,57 +256,55 @@ func (ts *TestSession) StartReceiving(ctx context.Context) {
 		ts.mu.Unlock()
 		return // Don't start if already stopping or no connection
 	}
-	ts.receiverWg.Add(1) // Mark that we're starting a receiver goroutine
+	ts.receiverWg.Add(1) // Track the goroutine with WaitGroup
 	ts.mu.Unlock()
 
 	go func() {
-		defer ts.receiverWg.Done() // Signal completion when goroutine exits
+		defer ts.receiverWg.Done()
 
-		buf := make([]byte, 2048) // Large enough for any test packet
+		buf := make([]byte, 2048)
 
 		for {
+			// Get a safe copy of the connection and stopChan
+			ts.mu.Lock()
+			conn := ts.conn
+			stopChan := ts.stopChan
+			ts.mu.Unlock()
+
+			if conn == nil || stopChan == nil {
+				return // Exit if either is nil
+			}
+
+			// Set a short deadline and check for ctx/stopChan frequently
+			conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+
 			select {
 			case <-ctx.Done():
 				return
-			case <-ts.stopChan:
+			case <-stopChan:
 				return
 			default:
-				// Safely access the connection with lock
-				ts.mu.Lock()
-				conn := ts.conn // Get local reference to connection
-				if conn == nil {
-					ts.mu.Unlock()
-					return // Exit if connection is nil
-				}
-
-				// Set a short read deadline so we can check for stop frequently
-				conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-				ts.mu.Unlock()
-
-				// Read from the connection (using our local reference)
+				// Try to read a packet
 				n, _, err := conn.ReadFrom(buf)
 				if err != nil {
+					// Handle timeout and continue
 					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-						// This is just a timeout, continue
 						continue
 					}
 
-					// Check if we've been asked to stop
+					// Check if we need to stop
 					select {
-					case <-ts.stopChan:
+					case <-stopChan:
 						return
 					default:
-						// Some other error, log but continue
-						continue
+						continue // Some other error
 					}
 				}
 
-				// Process received packet
 				recvTime := time.Now()
 				err = ts.processReceivedPacket(buf[:n], recvTime)
 				if err != nil {
-					// Log error but continue
-					continue
+					log.Printf("Error processing received packet: %v", err)
 				}
 			}
 		}
@@ -441,20 +440,22 @@ func (ts *TestSession) Stop() error {
 	// Mark as stopping
 	ts.isStopping = true
 
-	// Close the stop channel safely
-	if ts.stopChan != nil {
-		close(ts.stopChan)
-		ts.stopChan = nil
-	}
-
-	// Get a reference to the connection
+	// Get a reference to the stopChan and channel
+	stopChan := ts.stopChan
 	conn := ts.conn
-	ts.conn = nil // Clear the session's reference to prevent future use
+
+	// Clear the fields to prevent reuse
+	ts.stopChan = nil
+	ts.conn = nil
 
 	ts.mu.Unlock()
 
+	// Close channel outside lock
+	if stopChan != nil {
+		close(stopChan)
+	}
+
 	// Wait for receiver goroutine to exit
-	// This ensures it's not using the connection anymore
 	ts.receiverWg.Wait()
 
 	// Now it's safe to close the connection
