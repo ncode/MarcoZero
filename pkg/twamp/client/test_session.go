@@ -296,6 +296,8 @@ func (ts *TestSession) StartReceiving(ctx context.Context) {
 					select {
 					case <-stopChan:
 						return
+					case <-ctx.Done():
+						return
 					default:
 						continue // Some other error
 					}
