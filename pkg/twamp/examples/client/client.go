@@ -37,11 +37,10 @@ func main() {
 	sessionCfg := client.TestSessionConfig{
 		SenderPort:   10000,
 		ReceiverPort: 20000,
-		// PaddingLength: 41,  // common.ModeUnauthenticated
-		// PaddingLength: 56,  // common.ModeAuthenticated
-		// PaddingLength: 144, // for common.ModeEncrypted
-		PaddingLength: 0, // auto select
-		Timeout:       2 * time.Second,
+		// PaddingLength: 41,  // minimum common.ModeUnauthenticated
+		// PaddingLength: 56,  // minimum common.ModeAuthenticated
+		// PaddingLength: 144, // minimum common.ModeEncrypted
+		Timeout: 2 * time.Second,
 	}
 
 	session, err := twampClient.RequestSession(sessionCfg)
@@ -76,9 +75,10 @@ func main() {
 	fmt.Printf("  Min RTT: %v\n", results.MinRTT)
 	fmt.Printf("  Max RTT: %v\n", results.MaxRTT)
 	fmt.Printf("  Avg RTT: %v\n", results.AvgRTT)
-	fmt.Printf("  Min Latency: %v\n", results.MinReflectorLatency)
-	fmt.Printf("  Max Latency: %v\n", results.MaxReflectorLatency)
-	fmt.Printf("  Avg Latency: %v\n", results.AvgReflectorLatency)
+	fmt.Printf("  RTT variation: %d\n", results.RTTVariation)
+	fmt.Printf("  Avg Forward Delay: %v\n", results.AvgForwardDelay)
+	fmt.Printf("  Avg Revsere Delay: %v\n", results.AvgReverseDelay)
+	fmt.Printf("  Delay Asymmetry: %f\n", results.DelayAsymmetry)
 
 	// Stop sessions and cleanup
 	err = twampClient.StopSessions()
