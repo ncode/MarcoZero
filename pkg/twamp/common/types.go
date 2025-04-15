@@ -58,6 +58,20 @@ var ErrInvalidMessageLength = errors.New("invalid message length")
 // Mode represents TWAMP test modes
 type Mode uint32
 
+// ModeToString function to convert mode to string
+func ModeToString(mode Mode) string {
+	switch mode {
+	case ModeUnauthenticated:
+		return "unauthenticated"
+	case ModeAuthenticated:
+		return "authenticated"
+	case ModeEncrypted:
+		return "encrypted"
+	default:
+		return "unknown"
+	}
+}
+
 // ErrorEstimate represents the TWAMP error estimate field
 type ErrorEstimate struct {
 	Multiplier uint8

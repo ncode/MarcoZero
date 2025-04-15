@@ -193,13 +193,14 @@ func (ts *TestSession) SendTestPacket() error {
 		// If in authenticated or encrypted mode, calculate HMAC and encrypt
 		if ts.sessionKeys != nil {
 			// Calculate HMAC
-			hmac, err := crypto.CalculateHMAC(ts.sessionKeys.TestHMACKey, packet[:32])
-			if err != nil {
-				return err
+			hmacSize := 32
+			if ts.isEncrypted {
+				hmacSize = 96
 			}
+			hmac, err := crypto.CalculateHMAC(ts.sessionKeys.TestHMACKey, packet[:hmacSize])
 
 			// Copy HMAC into packet
-			copy(packet[32:48], hmac)
+			copy(packet[hmacSize:hmacSize+16], hmac)
 
 			// If in encrypted mode, encrypt the packet
 			if ts.isEncrypted {

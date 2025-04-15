@@ -15,10 +15,12 @@ func main() {
 	// Create a client
 	cfg := client.ClientConfig{
 		ServerAddress: "127.0.0.1:8620",
-		PreferredMode: common.ModeAuthenticated,
-		SharedSecret:  "test-password", // Shared secret for authentication
-		KeyID:         "test-user",     // KeyID that identifies which shared secret to use
-		Timeout:       5 * time.Second,
+		PreferredMode: common.ModeUnauthenticated,
+		//PreferredMode: common.ModeEncrypted,
+		//PreferredMode: common.ModeAuthenticated,
+		SharedSecret: "test-password", // Shared secret for authentication
+		KeyID:        "test-user",     // KeyID that identifies which shared secret to use
+		Timeout:      5 * time.Second,
 	}
 
 	twampClient := client.NewClient(cfg)
@@ -33,9 +35,12 @@ func main() {
 
 	// Request a test session
 	sessionCfg := client.TestSessionConfig{
-		SenderPort:    10000,
-		ReceiverPort:  20000,
-		PaddingLength: 64,
+		SenderPort:   10000,
+		ReceiverPort: 20000,
+		// PaddingLength: 41,  // common.ModeUnauthenticated
+		// PaddingLength: 56,  // common.ModeAuthenticated
+		// PaddingLength: 144, // for common.ModeEncrypted
+		PaddingLength: 0, // auto select
 		Timeout:       2 * time.Second,
 	}
 
