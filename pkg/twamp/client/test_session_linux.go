@@ -13,7 +13,7 @@ func isClockSynchronized() bool {
 	var timex syscall.Timex
 
 	// SYS_ADJTIMEX returns clock status
-	_, err := syscall.Syscall(syscall.SYS_ADJTIMEX, uintptr(unsafe.Pointer(&timex)), 0, 0)
+	_, _, err := syscall.Syscall(syscall.SYS_ADJTIMEX, uintptr(unsafe.Pointer(&timex)), 0, 0)
 	if err != 0 {
 		return false
 	}
