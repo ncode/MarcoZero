@@ -2,8 +2,10 @@ package client
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -605,6 +607,84 @@ func TestConnect_Authenticated(t *testing.T) {
 	}
 }
 
+func TestConnect_Encrypted(t *testing.T) {
+	// Start mock server that supports encrypted mode
+	server := newMockServer(t, common.ModeEncrypted)
+	defer server.stop()
+
+	// Create client with encryption config
+	cfg := ClientConfig{
+		ServerAddress: server.addr(),
+		PreferredMode: common.ModeEncrypted,
+		SharedSecret:  "test-password",
+		KeyID:         "test-user",
+		Timeout:       2 * time.Second,
+	}
+
+	client := NewClient(cfg)
+
+	// Connect to mock server
+	ctx := context.Background()
+	err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Failed to connect in encrypted mode: %v", err)
+	}
+	defer client.Close()
+
+	// Verify server received our connection
+	if !server.greetingSent || !server.setupReceived {
+		t.Fatal("Server did not complete handshake")
+	}
+
+	// Verify client state
+	if client.mode != common.ModeEncrypted {
+		t.Errorf("Expected client mode to be %d (encrypted), got %d",
+			common.ModeEncrypted, client.mode)
+	}
+
+	// Verify client has key derivation
+	if client.keyDerivation == nil {
+		t.Error("Expected keyDerivation to be set")
+	}
+
+	// Test RequestSession under encrypted mode
+	sessionCfg := TestSessionConfig{
+		SenderPort:      10000,
+		ReceiverPort:    20000,
+		ReceiverAddress: "127.0.0.1",
+		PaddingLength:   144, // Minimum padding for encrypted mode
+		Timeout:         1 * time.Second,
+	}
+
+	session, err := client.RequestSession(sessionCfg)
+	if err != nil {
+		t.Fatalf("Failed to request session in encrypted mode: %v", err)
+	}
+
+	// Verify server received request
+	if server.lastCommand != common.CmdRequestTWSession {
+		t.Errorf("Expected server to receive request session command, got %d",
+			server.lastCommand)
+	}
+
+	// Verify session was created successfully
+	if session == nil {
+		t.Fatal("Returned session is nil")
+	}
+
+	// Start the session
+	err = client.StartSessions()
+	if err != nil {
+		t.Fatalf("Failed to start sessions in encrypted mode: %v", err)
+	}
+
+	// Verify server received start command
+	if server.lastCommand != common.CmdStartSessions {
+		t.Errorf("Expected server to receive start session command, got %d",
+			server.lastCommand)
+	}
+}
+
 func TestRequestSession(t *testing.T) {
 	// Start mock server
 	server := newMockServer(t, common.ModeUnauthenticated)
@@ -776,25 +856,6 @@ func TestStopSessions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to stop sessions: %v", err)
 	}
-
-	/*	// Verify mock server received stop command
-			if server.lastCommand != common.CmdStopSessions {
-				t.Errorf("Expected server to receive stop session command, got %d", server.lastCommand)
-			}
-
-			// Verify sessions are cleared in client
-			if len(client.currentSessions) != 0 {
-				t.Fatalf("Expected 0 sessions after stop, got %d", len(client.currentSessions))
-			}
-
-		// Server should have cleared sessions too
-		server.sessionsMu.Lock()
-		sessionCount := len(server.sessions)
-		server.sessionsMu.Unlock()
-
-		if sessionCount != 0 {
-			t.Fatalf("Expected 0 sessions in server after stop, got %d", sessionCount)
-		}*/
 }
 
 func TestErrorCases(t *testing.T) {
@@ -914,5 +975,121 @@ func TestClose(t *testing.T) {
 	// Verify sessions are stopped
 	if len(client.currentSessions) != 0 {
 		t.Fatalf("Expected 0 sessions after close, got %d", len(client.currentSessions))
+	}
+}
+
+func TestInvalidIPAddress(t *testing.T) {
+	// Start mock server
+	server := newMockServer(t, common.ModeUnauthenticated)
+	defer server.stop()
+
+	// Create client
+	cfg := ClientConfig{
+		ServerAddress: server.addr(),
+		PreferredMode: common.ModeUnauthenticated,
+		Timeout:       2 * time.Second,
+	}
+
+	client := NewClient(cfg)
+
+	// Connect to mock server
+	ctx := context.Background()
+	err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer client.Close()
+
+	// Request a session with invalid IP address
+	sessionCfg := TestSessionConfig{
+		SenderPort:      10000,
+		ReceiverPort:    20000,
+		ReceiverAddress: "invalid-ip",
+		PaddingLength:   64,
+		Timeout:         1 * time.Second,
+	}
+
+	_, err = client.RequestSession(sessionCfg)
+
+	// Verify we get the expected error
+	if err == nil {
+		t.Fatal("Expected error for invalid IP address, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid receiver address") {
+		t.Fatalf("Expected 'invalid receiver address' error, got: %v", err)
+	}
+}
+
+func TestPaddingLengthAdjustment(t *testing.T) {
+	// Start mock server
+	server := newMockServer(t, common.ModeAuthenticated)
+	defer server.stop()
+
+	// Create client
+	cfg := ClientConfig{
+		ServerAddress: server.addr(),
+		PreferredMode: common.ModeAuthenticated,
+		SharedSecret:  "test-password",
+		KeyID:         "test-user",
+		Timeout:       2 * time.Second,
+	}
+
+	client := NewClient(cfg)
+
+	// Connect to mock server
+	ctx := context.Background()
+	err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer client.Close()
+
+	// Request a session with insufficient padding (should be auto-adjusted)
+	sessionCfg := TestSessionConfig{
+		SenderPort:      10000,
+		ReceiverPort:    20000,
+		ReceiverAddress: "127.0.0.1",
+		PaddingLength:   10, // Too small, should be adjusted
+		Timeout:         1 * time.Second,
+	}
+
+	session, err := client.RequestSession(sessionCfg)
+	if err != nil {
+		t.Fatalf("Failed to request session: %v", err)
+	}
+
+	// Verify session was created successfully
+	if session == nil {
+		t.Fatal("Returned session is nil")
+	}
+
+	// Verify the padding was adjusted (would require checking internal state)
+	// Since we can't directly check the adjusted padding, we at least verify
+	// that the session was created successfully despite the small initial padding
+}
+
+func TestConnectionTimeout(t *testing.T) {
+	// Use a non-routable IP that will cause timeout
+	// 192.0.2.0/24 is TEST-NET-1 from RFC 5737, reserved for documentation
+	cfg := ClientConfig{
+		ServerAddress: "192.0.2.1:862",
+		PreferredMode: common.ModeUnauthenticated,
+		Timeout:       500 * time.Millisecond, // Short timeout for faster test
+	}
+
+	client := NewClient(cfg)
+
+	// Attempt to connect - should time out
+	ctx := context.Background()
+	err := client.Connect(ctx)
+
+	// Verify we get timeout error
+	if err == nil {
+		t.Fatal("Expected timeout error, got nil")
+	}
+
+	var netErr net.Error
+	if !errors.As(err, &netErr) || !netErr.Timeout() {
+		t.Fatalf("Expected timeout error, got: %v", err)
 	}
 }
