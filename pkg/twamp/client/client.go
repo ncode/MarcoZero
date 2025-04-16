@@ -623,7 +623,11 @@ func (c *Client) Close() error {
 
 	// Close the control connection
 	if c.conn != nil {
-		return c.conn.Close()
+		err := c.conn.Close()
+		if err != nil {
+			return err
+		}
+		c.conn = nil
 	}
 
 	return nil
