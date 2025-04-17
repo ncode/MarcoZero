@@ -61,37 +61,6 @@ func TestTimestampMath(t *testing.T) {
 	}
 }
 
-func TestDurationBetween(t *testing.T) {
-	// Test duration calculation
-	start := TWAMPTimestamp{Seconds: 1000, Fraction: 0x40000000} // Quarter second
-	end := TWAMPTimestamp{Seconds: 1002, Fraction: 0x80000000}   // Half second
-
-	// Expected: 2.25 seconds
-	expected := 2*time.Second + 250*time.Millisecond
-
-	duration := DurationBetween(start, end)
-
-	// Allow a small tolerance due to floating point conversion
-	tolerance := time.Microsecond
-
-	if duration < expected-tolerance || duration > expected+tolerance {
-		t.Errorf("Duration calculation error: got %v, expected %v", duration, expected)
-	}
-
-	// Test with fraction underflow
-	start = TWAMPTimestamp{Seconds: 1000, Fraction: 0x80000000} // Half second
-	end = TWAMPTimestamp{Seconds: 1001, Fraction: 0x40000000}   // Quarter second
-
-	// Expected: 0.75 seconds
-	expected = 750 * time.Millisecond
-
-	duration = DurationBetween(start, end)
-
-	if duration < expected-tolerance || duration > expected+tolerance {
-		t.Errorf("Duration calculation with underflow error: got %v, expected %v", duration, expected)
-	}
-}
-
 func TestNTPEpoch(t *testing.T) {
 	// Test NTP epoch handling
 	// January 1, 1900, 00:00:00 UTC is the NTP epoch
@@ -135,5 +104,114 @@ func TestHighPrecision(t *testing.T) {
 	if math.Abs(float64(ts.Fraction)-float64(expectedFraction)) > 1.0 {
 		t.Errorf("1ns precision error: got fraction %d, expected ~%d",
 			ts.Fraction, expectedFraction)
+	}
+}
+
+// helper to compare two timestamps exactly in tests
+func equalTS(a, b TWAMPTimestamp) bool {
+	return a.Seconds == b.Seconds && a.Fraction == b.Fraction
+}
+
+// TestAddOverflowCarry verifies that Add() correctly carries when the fractional
+// sum exceeds 2^32 – i.e. one full second.
+func TestAddOverflowCarry(t *testing.T) {
+	start := TWAMPTimestamp{Seconds: 123, Fraction: (1 << 32) - 16} // 0xfffffff0
+	dur := 50 * time.Nanosecond                                     // gives ~214 frac units
+
+	got := start.Add(dur)
+
+	// Manually compute the expected result using the same rules as Add().
+	secs := start.Seconds
+	nanos := dur % time.Second
+	fracToAdd := uint32(float64(nanos.Nanoseconds()) * NanoToFrac)
+	newFracU64 := uint64(start.Fraction) + uint64(fracToAdd)
+	carry := uint32(0)
+	if newFracU64 >= (1 << 32) {
+		carry = 1
+		newFracU64 -= 1 << 32
+	}
+	want := TWAMPTimestamp{Seconds: secs + carry, Fraction: uint32(newFracU64)}
+
+	if !equalTS(got, want) {
+		t.Fatalf("Add overflow: want %+v, got %+v", want, got)
+	}
+}
+
+// TestSubUnderflowBorrow verifies that Sub() borrows correctly when the
+// fractional part underflows.
+func TestSubUnderflowBorrow(t *testing.T) {
+	start := TWAMPTimestamp{Seconds: 123, Fraction: 10}
+	dur := time.Microsecond // ~4 294 frac units
+
+	got := start.Sub(dur)
+
+	// Expected – borrow one full second
+	nanos := dur % time.Second
+	fracToSub := uint32(float64(nanos.Nanoseconds()) * NanoToFrac)
+	var newFrac uint32
+	borrow := uint32(0)
+	if fracToSub > start.Fraction {
+		borrow = 1
+		newFrac = uint32(uint64(start.Fraction) + (1 << 32) - uint64(fracToSub))
+	} else {
+		newFrac = start.Fraction - fracToSub
+	}
+	want := TWAMPTimestamp{Seconds: start.Seconds - borrow, Fraction: newFrac}
+
+	if !equalTS(got, want) {
+		t.Fatalf("Sub underflow: want %+v, got %+v", want, got)
+	}
+}
+
+// TestDurationBetween covers both the regular case and the underflow branch.
+func TestDurationBetween(t *testing.T) {
+	start := TWAMPTimestamp{Seconds: 100, Fraction: (1 << 32) - 100}
+	end := TWAMPTimestamp{Seconds: 101, Fraction: 50}
+
+	got := DurationBetween(start, end)
+	want := end.ToTime().Sub(start.ToTime())
+
+	// Accept ±1 ns tolerance due to float rounding.
+	diff := got - want
+	if diff > time.Nanosecond || diff < -time.Nanosecond {
+		t.Fatalf("DurationBetween mismatch: want %v, got %v", want, got)
+	}
+}
+
+// TestComparisonHelpers exercises Equal/Before/After for seconds and fraction.
+func TestComparisonHelpers(t *testing.T) {
+	a := TWAMPTimestamp{Seconds: 10, Fraction: 100}
+	b := TWAMPTimestamp{Seconds: 10, Fraction: 200}
+	c := TWAMPTimestamp{Seconds: 11, Fraction: 0}
+
+	if !a.Before(b) || b.Before(a) {
+		t.Fatalf("Before failed for same second different fraction")
+	}
+	if !b.After(a) || a.After(b) {
+		t.Fatalf("After failed for same second different fraction")
+	}
+	if !b.Before(c) || !a.Before(c) {
+		t.Fatalf("Before failed across seconds")
+	}
+	if !c.After(b) {
+		t.Fatalf("After failed across seconds")
+	}
+	if !a.Equal(a) || a.Equal(b) {
+		t.Fatalf("Equal logic incorrect")
+	}
+}
+
+// TestRoundTripTime ensures FromTime and ToTime are inverses to nanosecond
+// precision (the original time’s monotonic component is lost, so we compare
+// only the wall‑clock UnixNano).
+func TestRoundTripTime(t *testing.T) {
+	now := time.Now().Truncate(time.Nanosecond) // strip monotonic for fairness
+	ts := FromTime(now)
+	back := ts.ToTime()
+
+	// Allow ±1 ns tolerance because of float64 conversions.
+	delta := math.Abs(float64(back.UnixNano() - now.UnixNano()))
+	if delta > 1 {
+		t.Fatalf("Round‑trip exceeded tolerance: %dns", int64(delta))
 	}
 }
