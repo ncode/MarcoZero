@@ -40,7 +40,7 @@ type mockServer struct {
 	t               *testing.T // For logging in tests
 	challenge       [16]byte
 	salt            [16]byte
-	behavior        mockServerBehavior // New field for behavior configuration
+	behavior        mockServerBehavior
 }
 
 type mockSession struct {
