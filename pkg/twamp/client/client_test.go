@@ -15,7 +15,13 @@ import (
 	"github.com/ncode/MarcoZero/pkg/twamp/messages"
 )
 
-// mockServer implements a more complete TWAMP server for testing
+type mockServerBehavior struct {
+	rejectRequestSession bool
+	rejectCode           uint8
+	rejectStartSessions  bool
+	rejectStopSessions   bool
+}
+
 type mockServer struct {
 	listener        net.Listener
 	supportedModes  common.Mode
@@ -34,6 +40,7 @@ type mockServer struct {
 	t               *testing.T // For logging in tests
 	challenge       [16]byte
 	salt            [16]byte
+	behavior        mockServerBehavior
 }
 
 type mockSession struct {
@@ -69,6 +76,13 @@ func newMockServer(t *testing.T, modes common.Mode) *mockServer {
 
 	server.wg.Add(1)
 	go server.serve()
+	return server
+}
+
+// Create an enhanced version of the mock server that allows behavior configuration
+func newMockServerWithBehavior(t *testing.T, modes common.Mode, behavior mockServerBehavior) *mockServer {
+	server := newMockServer(t, modes)
+	server.behavior = behavior
 	return server
 }
 
@@ -383,6 +397,45 @@ func (s *mockServer) handleRequestSession(conn net.Conn, cmdData []byte, mode co
 		return
 	}
 
+	// Check if we should reject this request based on behavior configuration
+	if s.behavior.rejectRequestSession {
+		// Send rejection
+		acceptCode := s.behavior.rejectCode
+		if acceptCode == 0 {
+			acceptCode = common.AcceptFailure // Default rejection code
+		}
+
+		// Create Accept-Session response with rejection
+		acceptSession := &messages.AcceptSession{
+			Accept: acceptCode,
+			Port:   0,                  // No port when rejecting
+			SID:    common.SessionID{}, // Empty SID when rejecting
+		}
+
+		// Marshal and send the response with the appropriate HMAC handling
+		data, err := acceptSession.Marshal(mode != common.ModeUnauthenticated)
+		if err != nil {
+			s.t.Logf("Failed to marshal Accept-Session: %v", err)
+			return
+		}
+
+		if mode != common.ModeUnauthenticated && s.keyDerivation != nil {
+			// Add HMAC
+			hmac, err := crypto.CalculateHMAC(s.keyDerivation.HMACKey, data[:len(data)-16])
+			if err != nil {
+				s.t.Logf("Failed to calculate HMAC: %v", err)
+				return
+			}
+			copy(data[len(data)-16:], hmac)
+		}
+
+		_, err = conn.Write(data)
+		if err != nil {
+			s.t.Logf("Failed to send Accept-Session: %v", err)
+		}
+		return
+	}
+
 	// Send response
 	_, err = conn.Write(data)
 	if err != nil {
@@ -464,6 +517,43 @@ func (s *mockServer) handleStartSessions(conn net.Conn, cmdData []byte, mode com
 
 	if err != nil {
 		s.t.Logf("Failed to marshal Start-Ack: %v", err)
+		return
+	}
+
+	// Check if we should reject this request based on behavior configuration
+	if s.behavior.rejectStartSessions {
+		// Send rejection
+		acceptCode := s.behavior.rejectCode
+		if acceptCode == 0 {
+			acceptCode = common.AcceptFailure // Default rejection code
+		}
+
+		// Create Start-Ack response with rejection
+		startAck := &messages.StartAck{
+			Accept: acceptCode,
+		}
+
+		// Marshal and send the response with the appropriate HMAC handling
+		data, err := startAck.Marshal(mode != common.ModeUnauthenticated)
+		if err != nil {
+			s.t.Logf("Failed to marshal Start-Ack: %v", err)
+			return
+		}
+
+		if mode != common.ModeUnauthenticated && s.keyDerivation != nil {
+			// Add HMAC
+			hmac, err := crypto.CalculateHMAC(s.keyDerivation.HMACKey, data[:len(data)-16])
+			if err != nil {
+				s.t.Logf("Failed to calculate HMAC: %v", err)
+				return
+			}
+			copy(data[len(data)-16:], hmac)
+		}
+
+		_, err = conn.Write(data)
+		if err != nil {
+			s.t.Logf("Failed to send Start-Ack: %v", err)
+		}
 		return
 	}
 
@@ -1091,5 +1181,118 @@ func TestConnectionTimeout(t *testing.T) {
 	var netErr net.Error
 	if !errors.As(err, &netErr) || !netErr.Timeout() {
 		t.Fatalf("Expected timeout error, got: %v", err)
+	}
+}
+
+// TestServerRejectsRequestSession verifies client properly handles server rejection
+func TestServerRejectsRequestSession(t *testing.T) {
+	// Create a mock server that will reject session requests
+	server := newMockServerWithBehavior(t, common.ModeUnauthenticated, mockServerBehavior{
+		rejectRequestSession: true,
+		rejectCode:           common.AcceptTempResLimited, // Use a specific rejection code
+	})
+	defer server.stop()
+
+	// Create client
+	cfg := ClientConfig{
+		ServerAddress: server.addr(),
+		PreferredMode: common.ModeUnauthenticated,
+		Timeout:       2 * time.Second,
+	}
+
+	client := NewClient(cfg)
+
+	// Connect to mock server
+	ctx := context.Background()
+	err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer client.Close()
+
+	// Request a session - should be rejected by server
+	sessionCfg := TestSessionConfig{
+		SenderPort:      10000,
+		ReceiverPort:    20000,
+		ReceiverAddress: "127.0.0.1",
+		PaddingLength:   64,
+		Timeout:         1 * time.Second,
+	}
+
+	_, err = client.RequestSession(sessionCfg)
+
+	// Verify we get the expected error
+	if err == nil {
+		t.Fatal("Expected error when server rejects session request, got nil")
+	}
+
+	// The error should be a TWAMPError with the correct code
+	var twampErr *common.TWAMPError
+	if !errors.As(err, &twampErr) {
+		t.Fatalf("Expected *common.TWAMPError, got: %v", err)
+	}
+
+	if twampErr.AcceptCode != common.AcceptTempResLimited {
+		t.Errorf("Expected accept code %d, got %d",
+			common.AcceptTempResLimited, twampErr.AcceptCode)
+	}
+}
+
+func TestServerRejectsStartSessions(t *testing.T) {
+	// Create a mock server that will reject start sessions
+	server := newMockServerWithBehavior(t, common.ModeUnauthenticated, mockServerBehavior{
+		rejectStartSessions: true,
+		rejectCode:          common.AcceptTempResLimited,
+	})
+	defer server.stop()
+
+	// Create client
+	cfg := ClientConfig{
+		ServerAddress: server.addr(),
+		PreferredMode: common.ModeUnauthenticated,
+		Timeout:       2 * time.Second,
+	}
+
+	client := NewClient(cfg)
+
+	// Connect to mock server
+	ctx := context.Background()
+	err := client.Connect(ctx)
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer client.Close()
+
+	// Request a session
+	sessionCfg := TestSessionConfig{
+		SenderPort:      10000,
+		ReceiverPort:    20000,
+		ReceiverAddress: "127.0.0.1",
+		PaddingLength:   64,
+		Timeout:         1 * time.Second,
+	}
+
+	_, err = client.RequestSession(sessionCfg)
+	if err != nil {
+		t.Fatalf("Failed to request session: %v", err)
+	}
+
+	// Start sessions - should be rejected
+	err = client.StartSessions()
+
+	// Verify we get the expected error
+	if err == nil {
+		t.Fatal("Expected error when server rejects start sessions, got nil")
+	}
+
+	// The error should be a TWAMPError with the correct code
+	var twampErr *common.TWAMPError
+	if !errors.As(err, &twampErr) {
+		t.Fatalf("Expected *common.TWAMPError, got: %v", err)
+	}
+
+	if twampErr.AcceptCode != common.AcceptTempResLimited {
+		t.Errorf("Expected accept code %d, got %d",
+			common.AcceptTempResLimited, twampErr.AcceptCode)
 	}
 }
