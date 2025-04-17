@@ -178,10 +178,14 @@ func TestDurationBetween(t *testing.T) {
 	}
 }
 
-// TestComparisonHelpers exercises Equal/Before/After for seconds and fraction.
+// TestComparisonHelpers exercises Equal/Before/After for both fractional and
+// whole‑second divergences, including the edge cases where the second fields
+// alone decide the outcome.
 func TestComparisonHelpers(t *testing.T) {
+	// Same seconds, different fractions
 	a := TWAMPTimestamp{Seconds: 10, Fraction: 100}
 	b := TWAMPTimestamp{Seconds: 10, Fraction: 200}
+	// Different seconds
 	c := TWAMPTimestamp{Seconds: 11, Fraction: 0}
 
 	if !a.Before(b) || b.Before(a) {
@@ -198,6 +202,17 @@ func TestComparisonHelpers(t *testing.T) {
 	}
 	if !a.Equal(a) || a.Equal(b) {
 		t.Fatalf("Equal logic incorrect")
+	}
+
+	// Edge‑case branches: ts.Seconds > other.Seconds for Before() should be false
+	biggerSec := TWAMPTimestamp{Seconds: 20, Fraction: 0}
+	smallerSec := TWAMPTimestamp{Seconds: 19, Fraction: (1 << 32) - 1}
+	if biggerSec.Before(smallerSec) {
+		t.Fatalf("Before() with ts.Seconds > other.Seconds returned true, expected false")
+	}
+	// Edge‑case branches: ts.Seconds < other.Seconds for After() should be false
+	if smallerSec.After(biggerSec) {
+		t.Fatalf("After() with ts.Seconds < other.Seconds returned true, expected false")
 	}
 }
 
