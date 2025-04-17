@@ -1,4 +1,3 @@
-// pkg/twamp/client/test_session.go
 package client
 
 import (
@@ -141,6 +140,12 @@ func (ts *TestSession) Start() error {
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		return err
+	}
+
+	if cfg := ts.config.DSCP; cfg != 0 {
+		if err := common.SetDSCP(conn, cfg); err != nil {
+			log.Printf("cannot set DSCP on client socket: %v", err)
+		}
 	}
 
 	ts.mu.Lock()

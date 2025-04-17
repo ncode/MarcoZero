@@ -27,6 +27,7 @@ type ServerConfig struct {
 	SERVWAIT       time.Duration     // Default 900s
 	REFWAIT        time.Duration     // Default 900s
 	PortRange      [2]uint16         // Range of ports for reflection [min, max]
+	DSCP           uint8
 }
 
 // Server implements a TWAMP Server and Session-Reflector
@@ -739,6 +740,12 @@ func (s *Server) startSession(session *TestSession) error {
 		return fmt.Errorf("failed to listen on port %d: %w", session.reflectorPort, err)
 	}
 
+	if cfg := s.config.DSCP; cfg != 0 {
+		if err := common.SetDSCP(conn, cfg); err != nil {
+			log.Printf("cannot set DSCP on session socket: %v", err)
+		}
+	}
+
 	session.mu.Lock()
 	session.conn = conn
 	session.startTime = time.Now()
@@ -747,11 +754,6 @@ func (s *Server) startSession(session *TestSession) error {
 		session.stopChan = make(chan struct{})
 	}
 	session.mu.Unlock()
-
-	// Set DSCP if specified
-	if session.dscp > 0 {
-		// TODO: Implement DSCP setting for different platforms
-	}
 
 	// Mark as active using atomic
 	session.isActive.Store(true)
@@ -991,7 +993,7 @@ func (s *Server) processAndReflect(session *TestSession, packet []byte, addr net
 			SenderTimestamp:     senderTimestamp,
 			SenderErrorEstimate: senderErrorEstimate,
 			SenderTTL:           senderTTL,
-			PaddingSize:         len(packet) - 41, // Try to match original packet size
+			PaddingSize:         max(0, len(packet)-41), // Avoid negative padding
 		}
 
 		// Marshal the packet
